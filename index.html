@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6人対戦オンライン大富豪</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+body {
+  margin: 0;
+  background: #10251f;
+  color: white;
+  font-family: sans-serif;
+  text-align: center;
+}
+.container {
+  max-width: 480px;
+  margin: auto;
+  padding: 25px 18px;
+}
+h1 { color: #e7c879; margin-top: 35px; }
+.card {
+  background: #193b30;
+  border-radius: 18px;
+  padding: 22px;
+  margin: 18px 0;
+}
+input, button {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 15px;
+  margin: 8px 0;
+  border-radius: 10px;
+  border: none;
+  font-size: 16px;
+}
+button {
+  background: #d5ad57;
+  color: #17251e;
+  font-weight: bold;
+}
+button:disabled { opacity: .5; }
+.player {
+  background: #285344;
+  padding: 13px;
+  margin: 8px;
+  border-radius: 10px;
+}
+#message { color: #f4d98b; }
+</style>
+</head>
+
+<body>
+<div class="container">
+
+<h1>♠ 6人対戦 大富豪 ♠</h1>
+<p>ONLINE CARD GAME</p>
+
+<div class="card">
+<h2>プレイヤー名</h2>
+<input id="name" placeholder="名前を入力">
+</div>
+
+<div class="card">
+<h2>ルームを作る</h2>
+<button onclick="createRoom()">ルームを作成</button>
+</div>
+
+<div class="card">
+<h2>ルームに参加</h2>
+<input id="roomCode" placeholder="ルームコード">
+<button onclick="joinRoom()">参加する</button>
+</div>
+
+<div class="card">
+<h2>対戦ルーム</h2>
+<h2 id="code">未参加</h2>
+<p id="count">0 / 6 人</p>
+<div id="players"></div>
+<p id="message">接続中...</p>
+</div>
+
+</div>
+
+<script>
+const SUPABASE_URL =
+'https://lucddcdzqvtmqtqfzzbk.supabase.co';
+
+const SUPABASE_KEY =
+'sb_publishable_Q1dnstjiQz_EutxMG3tUxQ_Ynz3FAVv';
+
+const db = window.supabase.createClient(
+SUPABASE_URL,
+SUPABASE_KEY
+);
+
+let myId = null;
+let currentRoom = null;
+let channel = null;
+
+async function login() {
+  const { data: sessionData } =
+    await db.auth.getSession();
+
+  if (sessionData.session) {
+    myId = sessionData.session.user.id;
+  } else {
+    const { data, error } =
+      await db.auth.signInAnonymously();
+
+    if (error) throw error;
+    myId = data.user.id;
+  }
+
+  document.getElementById('message').textContent =
+    'オンライン接続完了！';
+}
+
+async function createRoom() {
+  try {
+    await login();
+
+    const name = document.getElementById('name').value.trim();
+    if (!name) return alert('名前を入力してね');
+
+    const code = Math.random().toString(36)
+      .substring(2, 8).toUpperCase();
+
+    const { data: room, error } = await db
+      .from('rooms')
+      .insert({
+        code: code,
+        host_id: myId
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    const { error: playerError } = await db
+      .from('players')
+      .insert({
+        room_id: room.id,
+        user_id: myId,
+        display_name: name,
+        seat: 1
+      });
+
+    if (playerError) throw playerError;
+
+    currentRoom = room;
+    await enterRoom();
+
+  } catch (e) {
+    alert('エラー: ' + e.message);
+  }
+}
+
+async function joinRoom() {
+  try {
+    await login();
+
+    const name = document.getElementById('name').value.trim();
+    const code = document.getElementById('roomCode')
+      .value.trim().toUpperCase();
+
+    if (!name || !code) {
+      return alert('名前とルームコードを入力してね');
+    }
+
+    const { data: room, error } = await db
+      .from('rooms')
+      .select('*')
+      .eq('code', code)
+      .single();
+
+    if (error || !room) {
+      return alert('ルームが見つかりません');
+    }
+
+    const { data: members, error: memberError } =
+      await db.from('players')
+      .select('seat')
+      .eq('room_id', room.id);
+
+    if (memberError) throw memberError;
+
+    if (members.length >= 6) {
+      return alert('このルームは満員です');
+    }
+
+    const used = members.map(p => p.seat);
+    let seat = 1;
+
+    while (used.includes(seat)) seat++;
+
+    const { error: joinError } = await db
+      .from('players')
+      .insert({
+        room_id: room.id,
+        user_id: myId,
+        display_name: name,
+        seat: seat
+      });
+
+    if (joinError) throw joinError;
+
+    currentRoom = room;
+    await enterRoom();
+
+  } catch (e) {
+    alert('エラー: ' + e.message);
+  }
+}
+
+async function enterRoom() {
+  document.getElementById('code').textContent =
+    'ROOM: ' + currentRoom.code;
+
+  await refreshPlayers();
+
+  if (channel) {
+    await db.removeChannel(channel);
+  }
+
+  channel = db.channel('room-' + currentRoom.id)
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'players',
+      filter: 'room_id=eq.' + currentRoom.id
+    }, refreshPlayers)
+    .subscribe();
+
+  document.getElementById('message').textContent =
+    '対戦ルームに参加しました！';
+}
+
+async function refreshPlayers() {
+  if (!currentRoom) return;
+
+  const { data, error } = await db
+    .from('players')
+    .select('*')
+    .eq('room_id', currentRoom.id)
+    .order('seat');
+
+  if (error) {
+    console.error(error);
+    return;
+  }
+
+  document.getElementById('count').textContent =
+    data.length + ' / 6 人';
+
+  const area = document.getElementById('players');
+  area.replaceChildren();
+
+  data.forEach(player => {
+    const div = document.createElement('div');
+    div.className = 'player';
+    div.textContent =
+      '席 ' + player.seat + '：' +
+      player.display_name +
+      (player.user_id === myId ? ' (あなた)' : '');
+
+    area.appendChild(div);
+  });
+}
+</script>
+</body>
+</html>
